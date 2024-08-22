@@ -19,7 +19,7 @@ pub struct Database {
     serializer_workbench: Mutex<SerializerWorkbench>,
 }
 
-/// SAFETY: serializer_workbench.last_commit has no interior mutability
+// SAFETY: serializer_workbench.last_commit has no interior mutability
 unsafe impl Send for Database {}
 unsafe impl Sync for Database {}
 
@@ -83,9 +83,6 @@ impl Database {
             file.read_exact(&mut kv_len)?;
             commit_cursor += 4;
             let kv_len = u32::from_le_bytes(kv_len);
-            if kv_len == 0 {
-                return Ok(());
-            }
 
             for _ in 0..kv_len {
                 let mut k_len = [0; 4];
@@ -127,9 +124,7 @@ impl Database {
             Err(error) => return Err(error),
         }
 
-        file.seek(SeekFrom::Start(cursor))?;
-        file.write(&0u32.to_le_bytes())?;
-        file.seek(SeekFrom::Start(cursor))?;
+        file.set_len(cursor)?;
 
         let commit_ptr = Box::into_raw(Box::new(Commit {
             prev: std::ptr::null(),
@@ -232,7 +227,6 @@ impl<'a> Transaction<'a> {
             prev: known_master,
             changes,
         }));
-        // first, push commit to master, if the push fails, get the new changes and check if they conflict with
         loop {
             match database.master.compare_exchange(
                 known_master as *mut _,
@@ -294,6 +288,8 @@ impl<'a> Transaction<'a> {
                     workbench.output_stream.write_all(&v)?;
                     new_cursor += 8 + k.len() as u64 + v.len() as u64;
                 }
+                workbench.output_stream.flush()?;
+                workbench.output_stream.sync_all()?;
                 snapshot = commit;
                 workbench.last_commit = commit;
                 workbench.cursor = new_cursor;

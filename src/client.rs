@@ -54,7 +54,6 @@ pub fn client() -> Result<(), std::io::Error> {
             }
             key => {
                 read_count += 1;
-                //println!("{}", conn.get(key.as_bytes())?.display());
                 println!(
                     "{RETURN}{}={}",
                     key,
