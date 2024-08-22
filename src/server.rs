@@ -2,27 +2,15 @@ use std::io::Error;
 
 use pathkvs_core::error::{TransactionConflict, TransposeConflict};
 
-struct UnsafeStaticDatabaseReference(&'static pathkvs_core::Database);
-
-struct Server {
-    db: &'static pathkvs_core::Database,
-    tr: Option<pathkvs_core::Transaction<'static>>,
-}
-
 pub fn serve() -> Result<std::convert::Infallible, Error> {
     let listener = std::net::TcpListener::bind("127.0.0.1:6314")?;
     let database = pathkvs_core::Database::open("data.pathkvs")?;
-    let database = UnsafeStaticDatabaseReference::new(database);
+    let database = &*Box::leak(Box::new(database));
     loop {
         let (mut stream, _) = listener.accept()?;
         std::thread::spawn(move || {
-            let result = pathkvs_net::server::serve(
-                &mut stream,
-                &mut Server {
-                    db: &database.0,
-                    tr: None,
-                },
-            );
+            let mut server = Server::new(database);
+            let result = pathkvs_net::server::serve(&mut stream, &mut server);
             match result {
                 Ok(()) => {}
                 Err(error) => {
@@ -33,20 +21,14 @@ pub fn serve() -> Result<std::convert::Infallible, Error> {
     }
 }
 
-impl UnsafeStaticDatabaseReference {
-    fn new(database: pathkvs_core::Database) -> Self {
-        let ptr = Box::into_raw(Box::new(database));
-        unsafe { Self(ptr.as_ref().unwrap_unchecked()) }
-    }
+struct Server {
+    db: &'static pathkvs_core::Database,
+    tr: Option<pathkvs_core::Transaction<'static>>,
 }
 
-impl Drop for UnsafeStaticDatabaseReference {
-    fn drop(&mut self) {
-        unsafe {
-            drop(Box::from_raw(
-                self.0 as *const pathkvs_core::Database as *mut pathkvs_core::Database,
-            ));
-        }
+impl Server {
+    const fn new(db: &'static pathkvs_core::Database) -> Self {
+        Self { db, tr: None }
     }
 }
 

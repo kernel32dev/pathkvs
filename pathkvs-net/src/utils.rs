@@ -1,5 +1,5 @@
-use std::io::{Error, Read, Write};
 use pathkvs_core::error::ProtocolError;
+use std::io::{Error, Read, Write};
 
 pub trait ReadEx: Read {
     fn read_u8(&mut self) -> Result<u8, Error> {
@@ -14,7 +14,7 @@ pub trait ReadEx: Read {
     }
     fn read_vec(&mut self, len: usize) -> Result<Vec<u8>, Error> {
         let mut buf = Vec::new();
-        buf.reserve_exact(len );
+        buf.reserve_exact(len);
         unsafe { buf.set_len(len) };
         self.read_exact(&mut buf)?;
         Ok(buf)

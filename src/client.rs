@@ -30,7 +30,9 @@ pub fn client() -> Result<(), std::io::Error> {
             "commit" => {
                 match conn.commit() {
                     Ok(()) => {
-                        println!("{RETURN}commited {read_count} read(s) and {write_count} write(s)");
+                        println!(
+                            "{RETURN}commited {read_count} read(s) and {write_count} write(s)"
+                        );
                         read_count = 0;
                         write_count = 0;
                     }
@@ -54,11 +56,7 @@ pub fn client() -> Result<(), std::io::Error> {
             }
             key => {
                 read_count += 1;
-                println!(
-                    "{RETURN}{}={}",
-                    key,
-                    conn.read(key.as_bytes())?.display()
-                );
+                println!("{RETURN}{}={}", key, conn.read(key.as_bytes())?.display());
             }
         }
     }
@@ -78,10 +76,10 @@ pub fn stress() -> Result<(), std::io::Error> {
         match conn.commit().transpose_conflict()? {
             Ok(()) => {
                 remaining -= 1;
-            },
+            }
             Err(TransactionConflict) => {
                 println!("conflito ao escrever {inc}");
-            },
+            }
         }
     }
     Ok(())
