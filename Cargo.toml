@@ -5,3 +5,4 @@ edition = "2021"
 
 [dependencies]
 pathkvs-core = { path = "pathkvs-core" }
+pathkvs-net = { path = "pathkvs-net" }

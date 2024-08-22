@@ -8,11 +8,19 @@ use std::{
     sync::atomic::{AtomicBool, AtomicPtr, Ordering},
 };
 
+use error::TransactionError;
+
+pub mod error;
+
 pub struct Database {
     master: AtomicPtr<Commit>,
     serializer_flag: AtomicBool,
     serializer_workbench: UnsafeCell<SerializerWorkbench>,
 }
+
+/// SAFETY: serializer_workbench is protected behind serializer_flag
+unsafe impl Send for Database {}
+unsafe impl Sync for Database {}
 
 struct SerializerWorkbench {
     last_commit: *const Commit,
@@ -37,32 +45,6 @@ pub struct Transaction<'a> {
 pub struct ReadOnlyTransaction<'a> {
     snapshot: *const Commit,
     _marker: PhantomData<&'a Database>,
-}
-
-pub enum TransactionError {
-    Conflict,
-    Io(Error),
-}
-
-impl From<TransactionError> for Error {
-    fn from(value: TransactionError) -> Self {
-        struct PathkvsTransactionConflict;
-        impl std::fmt::Debug for PathkvsTransactionConflict {
-            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                std::fmt::Display::fmt(self, f)
-            }
-        }
-        impl std::fmt::Display for PathkvsTransactionConflict {
-            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                f.write_str("patkvs transaction conflict")
-            }
-        }
-        impl std::error::Error for PathkvsTransactionConflict {}
-        match value {
-            TransactionError::Conflict => Error::new(ErrorKind::Other, PathkvsTransactionConflict),
-            TransactionError::Io(error) => error,
-        }
-    }
 }
 
 impl Database {
@@ -172,16 +154,23 @@ impl Database {
             changes: HashMap::new(),
         }
     }
-    pub fn write(&self, key: &[u8], value: &[u8]) -> Result<(), TransactionError> {
+    pub fn write(&self, key: &[u8], value: &[u8]) -> Result<(), Error> {
         let mut ts = self.start_writes();
         ts.write(key, value);
-        ts.commit()
+        match ts.commit() {
+            Ok(()) => Ok(()),
+            Err(TransactionError::Conflict) => unreachable!("a write only transaction cannot conflict"),
+            Err(TransactionError::Io(error)) => Err(error),
+        }
     }
     pub fn start_reads<'a>(&'a self) -> ReadOnlyTransaction<'a> {
         ReadOnlyTransaction {
             snapshot: self.master.load(Ordering::SeqCst),
             _marker: PhantomData,
         }
+    }
+    pub fn len<'b>(&'b self, key: &[u8]) -> u32 {
+        self.start_reads().len(key)
     }
     pub fn read<'b>(&'b self, key: &[u8]) -> &'b [u8] {
         self.start_reads().read(key)
@@ -216,6 +205,9 @@ impl Commit {
 }
 
 impl<'a> Transaction<'a> {
+    pub fn len<'b>(&'b mut self, key: &[u8]) -> u32 {
+        self.read(key).len() as u32
+    }
     pub fn read<'b>(&'b mut self, key: &[u8]) -> &'b [u8] {
         if let Some(value) = self.changes.get(key) {
             return value;
@@ -343,6 +335,9 @@ impl<'a> Transaction<'a> {
 }
 
 impl<'a> ReadOnlyTransaction<'a> {
+    pub fn len(&self, key: &[u8]) -> u32 {
+        self.read(key).len() as u32
+    }
     pub fn read(&self, key: &[u8]) -> &'a [u8] {
         unsafe { Commit::read_key(self.snapshot, key) }
     }

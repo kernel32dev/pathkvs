@@ -7,15 +7,15 @@
         {
             "type": "lldb",
             "request": "launch",
-            "name": "Debug executable 'patkvs-test'",
+            "name": "Debug executable 'pathkvs-test'",
             "cargo": {
                 "args": [
                     "build",
-                    "--bin=patkvs-test",
-                    "--package=patkvs-test"
+                    "--bin=pathkvs-test",
+                    "--package=pathkvs-test"
                 ],
                 "filter": {
-                    "name": "patkvs-test",
+                    "name": "pathkvs-test",
                     "kind": "bin"
                 }
             },
@@ -25,16 +25,16 @@
         {
             "type": "lldb",
             "request": "launch",
-            "name": "Debug unit tests in executable 'patkvs-test'",
+            "name": "Debug unit tests in executable 'pathkvs-test'",
             "cargo": {
                 "args": [
                     "test",
                     "--no-run",
-                    "--bin=patkvs-test",
-                    "--package=patkvs-test"
+                    "--bin=pathkvs-test",
+                    "--package=pathkvs-test"
                 ],
                 "filter": {
-                    "name": "patkvs-test",
+                    "name": "pathkvs-test",
                     "kind": "bin"
                 }
             },
