@@ -15,16 +15,20 @@ use error::TransactionError;
 pub mod error;
 
 pub struct Database {
-    master: AtomicPtr<Commit>,
-    serializer_workbench: Mutex<SerializerWorkbench>,
+    resolved_master: AtomicPtr<Commit>,
+    serialized_master: AtomicPtr<Commit>,
+    history_sink: Mutex<HistorySink>,
 }
 
-// SAFETY: serializer_workbench.last_commit has no interior mutability
-unsafe impl Send for Database {}
-unsafe impl Sync for Database {}
+struct _AssertDatabaseSend
+where
+    Database: Send;
 
-struct SerializerWorkbench {
-    last_commit: *const Commit,
+struct _AssertDatabaseSync
+where
+    Database: Sync;
+
+struct HistorySink {
     output_stream: File,
     cursor: u64,
 }
@@ -57,9 +61,9 @@ impl Database {
             .create(true)
             .open(path)?;
         Ok(Self {
-            master: AtomicPtr::new(std::ptr::null_mut()),
-            serializer_workbench: Mutex::new(SerializerWorkbench {
-                last_commit: std::ptr::null(),
+            resolved_master: AtomicPtr::new(std::ptr::null_mut()),
+            serialized_master: AtomicPtr::new(std::ptr::null_mut()),
+            history_sink: Mutex::new(HistorySink {
                 output_stream: file,
                 cursor: 0,
             }),
@@ -132,9 +136,9 @@ impl Database {
         }));
 
         Ok(Self {
-            master: AtomicPtr::new(commit_ptr),
-            serializer_workbench: Mutex::new(SerializerWorkbench {
-                last_commit: commit_ptr as *const Commit,
+            resolved_master: AtomicPtr::new(commit_ptr),
+            serialized_master: AtomicPtr::new(commit_ptr),
+            history_sink: Mutex::new(HistorySink {
                 output_stream: file,
                 cursor,
             }),
@@ -143,7 +147,7 @@ impl Database {
     pub fn start_writes<'a>(&'a self) -> Transaction<'a> {
         Transaction {
             database: self,
-            snapshot: self.master.load(Ordering::SeqCst),
+            snapshot: self.serialized_master.load(Ordering::SeqCst),
             reads: HashSet::new(),
             changes: HashMap::new(),
         }
@@ -161,7 +165,7 @@ impl Database {
     }
     pub fn start_reads<'a>(&'a self) -> ReadOnlyTransaction<'a> {
         ReadOnlyTransaction {
-            snapshot: self.master.load(Ordering::SeqCst),
+            snapshot: self.serialized_master.load(Ordering::SeqCst),
             _marker: PhantomData,
         }
     }
@@ -171,11 +175,55 @@ impl Database {
     pub fn read<'b>(&'b self, key: &[u8]) -> &'b [u8] {
         self.start_reads().read(key)
     }
+
+    fn persist(&self) -> Result<(), Error> {
+        loop {
+            let mut resolved_master = self.resolved_master.load(Ordering::SeqCst) as *const Commit;
+            let mut workbench = self.history_sink.lock().unwrap();
+            let serialized_master = self.serialized_master.load(Ordering::SeqCst) as *const Commit;
+            let mut stack = Vec::new();
+            while resolved_master != serialized_master {
+                stack.push(resolved_master);
+                unsafe {
+                    resolved_master = resolved_master
+                        .as_ref()
+                        .expect("snapshot cannot be unwound without first hiting the last_commit")
+                        .prev;
+                }
+            }
+            if stack.is_empty() {
+                return Ok(());
+            }
+            for commit in stack.into_iter().rev() {
+                let commit_ref = unsafe { commit.as_ref().unwrap_unchecked() };
+                let mut new_cursor = workbench.cursor;
+                workbench.output_stream.seek(SeekFrom::Start(new_cursor))?;
+                workbench.output_stream.set_len(new_cursor)?;
+                let kv_len_bytes = (commit_ref.changes.len() as u32).to_le_bytes();
+                workbench.output_stream.write_all(&kv_len_bytes)?;
+                new_cursor += 4;
+                for (k, v) in &commit_ref.changes {
+                    let k_len_bytes = (k.len() as u32).to_le_bytes();
+                    workbench.output_stream.write_all(&k_len_bytes)?;
+                    workbench.output_stream.write_all(&k)?;
+                    let v_len_bytes = (v.len() as u32).to_le_bytes();
+                    workbench.output_stream.write_all(&v_len_bytes)?;
+                    workbench.output_stream.write_all(&v)?;
+                    new_cursor += 8 + k.len() as u64 + v.len() as u64;
+                }
+                workbench.output_stream.flush()?;
+                workbench.output_stream.sync_all()?;
+                self.serialized_master
+                    .store(commit as *mut _, Ordering::SeqCst);
+                workbench.cursor = new_cursor;
+            }
+        }
+    }
 }
 
 impl Drop for Database {
     fn drop(&mut self) {
-        let mut commit_ptr = *self.master.get_mut();
+        let mut commit_ptr = *self.resolved_master.get_mut();
         unsafe {
             while let Some(commit) = commit_ptr.as_mut() {
                 std::ptr::drop_in_place(&mut commit.changes);
@@ -228,7 +276,7 @@ impl<'a> Transaction<'a> {
             changes,
         }));
         loop {
-            match database.master.compare_exchange(
+            match database.resolved_master.compare_exchange(
                 known_master as *mut _,
                 commit_ptr,
                 Ordering::SeqCst,
@@ -259,48 +307,7 @@ impl<'a> Transaction<'a> {
                 }
             }
         }
-        let mut snapshot = commit_ptr as *const Commit;
-        let mut workbench = self.database.serializer_workbench.lock().unwrap();
-        let mut stack = Vec::new();
-        while snapshot != workbench.last_commit {
-            stack.push(snapshot);
-            unsafe {
-                snapshot = snapshot
-                    .as_ref()
-                    .expect("snapshot cannot be unwound without first hiting the last_commit")
-                    .prev;
-            }
-        }
-        let result: Result<(), Error> = (|| {
-            for commit in stack.into_iter().rev() {
-                let commit_ref = unsafe { commit.as_ref().unwrap_unchecked() };
-                let mut new_cursor = workbench.cursor;
-                workbench.output_stream.seek(SeekFrom::Start(new_cursor))?;
-                let kv_len_bytes = (commit_ref.changes.len() as u32).to_le_bytes();
-                workbench.output_stream.write_all(&kv_len_bytes)?;
-                new_cursor += 4;
-                for (k, v) in &commit_ref.changes {
-                    let k_len_bytes = (k.len() as u32).to_le_bytes();
-                    workbench.output_stream.write_all(&k_len_bytes)?;
-                    workbench.output_stream.write_all(&k)?;
-                    let v_len_bytes = (v.len() as u32).to_le_bytes();
-                    workbench.output_stream.write_all(&v_len_bytes)?;
-                    workbench.output_stream.write_all(&v)?;
-                    new_cursor += 8 + k.len() as u64 + v.len() as u64;
-                }
-                workbench.output_stream.flush()?;
-                workbench.output_stream.sync_all()?;
-                snapshot = commit;
-                workbench.last_commit = commit;
-                workbench.cursor = new_cursor;
-            }
-            Ok(())
-        })();
-        drop(workbench);
-        match result {
-            Ok(()) => Ok(()),
-            Err(error) => Err(TransactionError::Io(error)),
-        }
+        self.database.persist().map_err(TransactionError::Io)
     }
     pub fn rollback(self) {
         drop(self)

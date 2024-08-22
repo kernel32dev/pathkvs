@@ -68,7 +68,7 @@ pub fn stress() -> Result<(), std::io::Error> {
     conn.set_read_timeout(Some(Duration::from_secs(1)))?;
     conn.set_write_timeout(Some(Duration::from_secs(1)))?;
     let mut conn = pathkvs_net::client::Connection::new(conn);
-    let mut remaining = 50000;
+    let mut remaining = 500;
     while remaining > 0 {
         conn.start_transaction()?;
         let inc = conn.read_u64_opt("INC")?.unwrap_or(0);

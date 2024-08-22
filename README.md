@@ -3,7 +3,7 @@ pathkvs
 
 banco chave valor persistente transacionado baseado em operações atomicas com histórico
 
-isso é uma prova de conceito demonstando um banco relativamente performático e simples, que suporta ACID e resolve conflitos sem ter que usar semáforos
+isso é uma prova de conceito demonstando um banco relativamente simples, que suporta ACID e detecta conflitos sem usar semáforos
 
 o acrónimo significa *Persitent Atomic Transacted Historical Key Value Store*
 
@@ -12,7 +12,7 @@ o acrónimo significa *Persitent Atomic Transacted Historical Key Value Store*
 primeito, tenha rust instalado, então:
 
 * execute `cargo run serve`, para rodar um servidor na porta 6314
-* execute `cargo run stress`, para incrementar a variável `INC` 50000 vezes
+* execute `cargo run stress`, para incrementar a variável `INC` 500 vezes
 * execute `cargo run`, para ter um terminal interativo com o qual você pode rodar comandos
 
 ## Testando o banco
@@ -31,6 +31,11 @@ depois execute `cargo run`, e então digite `INC` e então aperte `Enter`, para 
 3. `commit` - comitar as mudanças
 4. `rollback` - desfazer as mudanças
 5. Ctrl + C - encerrar o programa
+
+### Performance
+é terrível, em uma máquina boa, mais ou menos 40ms por transação, 25 transações por segundo
+
+isso é por causa da necessidade de sincronizar com o disco
 
 ### Features e caracteristicas
 * suporta apenas isolamento de nível serializável, que o nível mais alto que tem em bancos de dados
@@ -96,7 +101,7 @@ note que em nenhuma hora a thread é bloqueada por causa de um mutex ou lock, is
 
 ainda existe o mutex da serialização que todas as threads tem que usar depois que comitam para salvar suas mudanças no disco e poder retornar, e apesar de ser um mutex que todas as threads tem que usar, o trabalho da seção crítica é relativamente pequeno, e traz vários benefícios como a serialização dos commits e a preservação do histórico
 
-sem contar que nesse modelo, apesar de possívelmente ter alta [contenção](https://en.wikipedia.org/wiki/Resource_contention) na hora de comitar, as threads tem zero [contenção](https://en.wikipedia.org/wiki/Resource_contention) fora isso, o que não pode ser dito sobre implementações tradicionais que usam semáforos, toda outra operação, iniciar transação, escritas, leituras e rollbacks são virtualmente gratuitas e completamente livres de [contenção](https://en.wikipedia.org/wiki/Resource_contention), limitadas apenas pela ram e cpu disponível no computador
+esse modelo, tem altíssima [contenção](https://en.wikipedia.org/wiki/Resource_contention) na hora de comitar, isso se dá especialemente pelo fato de ter apenas um local onde se pode escrever as operações, fora esso situação as threads tem zero [contenção](https://en.wikipedia.org/wiki/Resource_contention), toda outra operação, iniciar transação, escritas, leituras e rollbacks são virtualmente gratuitas e completamente livres de [contenção](https://en.wikipedia.org/wiki/Resource_contention), limitadas apenas pela ram e cpu disponível no computador
 
 e um fato interessante é que nesse modelo um rollback, não dá trabalho nenhum, é só a thread esqueçer o ponteiro para o commit e as mudanças e leituras que estava rastreando
 
