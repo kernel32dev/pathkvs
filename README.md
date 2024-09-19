@@ -28,9 +28,11 @@ depois execute `cargo run`, e então digite `INC` e então aperte `Enter`, para 
 ## Comandos do terminal interatico
 1. `<chave>=<valor>` - salvar um valor no banco
 2. `<chave>` - ler o valor da chave
-3. `commit` - comitar as mudanças
-4. `rollback` - desfazer as mudanças
-5. Ctrl + C - encerrar o programa
+3. `<comeco>*<fim>` - listar todas as chaves que começam com `<comeco>` e terminam com `<fim>`
+3. `<comeco>*<fim>=` - mesma coisa que o comando acima, mas também mostra o valor
+4. `commit` - comitar as mudanças
+5. `rollback` - desfazer as mudanças
+6. Ctrl + C - encerrar o programa
 
 ### Performance
 é terrível, em uma máquina boa, mais ou menos 40ms por transação, 25 transações por segundo
@@ -38,8 +40,7 @@ depois execute `cargo run`, e então digite `INC` e então aperte `Enter`, para 
 isso é por causa da necessidade de sincronizar com o disco
 
 ### Features e caracteristicas
-* suporta apenas isolamento de nível serializável, que o nível mais alto que tem em bancos de dados
-* suporta leitura e escrita de chave valor, não suporta enumeração de chaves (por enquanto)
+* suporta apenas isolamento serializável, que o nível mais alto que tem em bancos de dados
 * têm um protocolo tcp/ip simples
 * usa exclusivamente operações atomicas para resolver conflitos
 * usa apenas um mutex para proteger a serialização do arquivo
@@ -47,6 +48,7 @@ isso é por causa da necessidade de sincronizar com o disco
 * não é possível diminuir o tamanho do banco
 * não suporta esperas na leitura, não é possível esperar até que um recurso esteja "liberado" (isso é uma grande limitação)
 * não consegue ler do disco para evitar uso desnecessário de memória, todo o banco tem que caber na RAM
+* não tem índices
 
 ### Suporta ACID
 * *Atomicity* - caso o commit não seja escrito completamente ao banco, ele será ignorado quando o servidor for reiniciado, e quem fez o commit com certeza não receberá um ok

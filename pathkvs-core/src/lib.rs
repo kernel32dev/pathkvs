@@ -1,8 +1,7 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     fs::File,
     io::{Error, ErrorKind, Read, Seek, SeekFrom, Write},
-    marker::PhantomData,
     path::Path,
     sync::{
         atomic::{AtomicPtr, Ordering},
@@ -33,6 +32,7 @@ struct HistorySink {
     cursor: u64,
 }
 
+#[derive(Clone)]
 struct Commit {
     prev: *const Commit,
     changes: HashMap<Vec<u8>, Vec<u8>>,
@@ -41,15 +41,14 @@ struct Commit {
 #[derive(Clone)]
 pub struct Transaction<'a> {
     database: &'a Database,
-    snapshot: *const Commit,
+    commit: Commit,
     reads: HashSet<Vec<u8>>,
-    changes: HashMap<Vec<u8>, Vec<u8>>,
+    scans: HashSet<(Vec<u8>, usize)>,
 }
 
-#[derive(Clone, Copy)]
-pub struct ReadOnlyTransaction<'a> {
-    snapshot: *const Commit,
-    _marker: PhantomData<&'a Database>,
+#[derive(Clone)]
+pub struct Snapshot<'a> {
+    commit: Option<&'a Commit>,
 }
 
 impl Database {
@@ -147,12 +146,18 @@ impl Database {
     pub fn start_writes<'a>(&'a self) -> Transaction<'a> {
         Transaction {
             database: self,
-            snapshot: self.serialized_master.load(Ordering::SeqCst),
+            commit: Commit {
+                prev: self.serialized_master.load(Ordering::SeqCst),
+                changes: HashMap::new(),
+            },
             reads: HashSet::new(),
-            changes: HashMap::new(),
+            scans: HashSet::new(),
         }
     }
     pub fn write(&self, key: &[u8], value: &[u8]) -> Result<(), Error> {
+        if key.is_empty() {
+            return Ok(());
+        }
         let mut ts = self.start_writes();
         ts.write(key, value);
         match ts.commit() {
@@ -163,17 +168,33 @@ impl Database {
             Err(TransactionError::Io(error)) => Err(error),
         }
     }
-    pub fn start_reads<'a>(&'a self) -> ReadOnlyTransaction<'a> {
-        ReadOnlyTransaction {
-            snapshot: self.serialized_master.load(Ordering::SeqCst),
-            _marker: PhantomData,
+    pub fn snapshot<'a>(&'a self) -> Snapshot<'a> {
+        unsafe {
+            Snapshot {
+                commit: self.serialized_master.load(Ordering::SeqCst).as_ref(),
+            }
         }
     }
     pub fn len<'b>(&'b self, key: &[u8]) -> u32 {
-        self.start_reads().len(key)
+        if key.is_empty() {
+            return 0;
+        }
+        self.snapshot().len(key)
     }
     pub fn read<'b>(&'b self, key: &[u8]) -> &'b [u8] {
-        self.start_reads().read(key)
+        if key.is_empty() {
+            return &[];
+        }
+        self.snapshot().read(key)
+    }
+    pub fn count<'b>(&'b self, start: &[u8], end: &[u8]) -> u32 {
+        self.snapshot().count(start, end)
+    }
+    pub fn list<'b>(&'b self, start: &[u8], end: &[u8]) -> Vec<&'b [u8]> {
+        self.snapshot().list(start, end)
+    }
+    pub fn scan<'b>(&'b self, start: &[u8], end: &[u8]) -> Vec<(&'b [u8], &'b [u8])> {
+        self.snapshot().scan(start, end)
     }
 
     fn persist(&self) -> Result<(), Error> {
@@ -234,7 +255,10 @@ impl Drop for Database {
 }
 
 impl Commit {
-    unsafe fn read_key<'a>(mut commit: *const Commit, key: &[u8]) -> &'a [u8] {
+    unsafe fn ptr_len(commit: *const Commit, key: &[u8]) -> u32 {
+        Commit::ptr_read(commit, key).len() as u32
+    }
+    unsafe fn ptr_read<'a>(mut commit: *const Commit, key: &[u8]) -> &'a [u8] {
         if key.len() > u32::MAX as usize {
             return &[];
         }
@@ -246,30 +270,185 @@ impl Commit {
         }
         &[]
     }
+    unsafe fn ptr_count(commit: *const Commit, start: &[u8], end: &[u8]) -> u32 {
+        let mut count = 0;
+        let mut keys = HashMap::new();
+        Commit::ptr_historic_scan(commit, start, end, |key, value| {
+            keys.entry(key).or_insert_with(|| {
+                if !value.is_empty() {
+                    count += 1;
+                }
+            });
+        });
+        count
+    }
+    unsafe fn ptr_list<'a>(commit: *const Commit, start: &[u8], end: &[u8]) -> Vec<&'a [u8]> {
+        let mut count = 0;
+        let mut keys = BTreeMap::new();
+        Commit::ptr_historic_scan(commit, start, end, |key, value| {
+            keys.entry(key).or_insert_with(|| {
+                if !value.is_empty() {
+                    count += 1;
+                }
+                !value.is_empty()
+            });
+        });
+        let mut vec = Vec::new();
+        vec.reserve_exact(count);
+        vec.extend(keys.into_iter().filter_map(|(k, v)| v.then_some(k)));
+        vec
+    }
+    unsafe fn ptr_scan<'a>(
+        commit: *const Commit,
+        start: &[u8],
+        end: &[u8],
+    ) -> Vec<(&'a [u8], &'a [u8])> {
+        let mut count = 0;
+        let mut keys = BTreeMap::new();
+        Commit::ptr_historic_scan(commit, start, end, |key, value| {
+            keys.entry(key).or_insert_with(|| {
+                if !value.is_empty() {
+                    count += 1;
+                }
+                value
+            });
+        });
+        let mut vec = Vec::new();
+        vec.reserve_exact(count);
+        vec.extend(keys.into_iter().filter(|(_, v)| !v.is_empty()));
+        vec
+    }
+
+    pub fn len(&self, key: &[u8]) -> u32 {
+        unsafe { Commit::ptr_len(self, key) }
+    }
+    pub fn read<'a>(&'a self, key: &[u8]) -> &'a [u8] {
+        unsafe { Commit::ptr_read(self, key) }
+    }
+    pub fn count(&self, start: &[u8], end: &[u8]) -> u32 {
+        unsafe { Commit::ptr_count(self, start, end) }
+    }
+    pub fn list<'a>(&'a self, start: &[u8], end: &[u8]) -> Vec<&'a [u8]> {
+        unsafe { Commit::ptr_list(self, start, end) }
+    }
+    pub fn scan<'a>(&'a self, start: &[u8], end: &[u8]) -> Vec<(&'a [u8], &'a [u8])> {
+        unsafe { Commit::ptr_scan(self, start, end) }
+    }
+
+    /// callback may be called with multiple values for a same key
+    ///
+    /// consider only the first one
+    ///
+    /// callback may also be called with empty value, which means the key is not present, beware
+    unsafe fn ptr_historic_scan<'a>(
+        mut commit: *const Commit,
+        start: &[u8],
+        end: &[u8],
+        mut callback: impl FnMut(&'a [u8], &'a [u8]),
+    ) {
+        if !start
+            .len()
+            .checked_add(end.len())
+            .is_some_and(|x| x < u32::MAX as usize)
+        {
+            return;
+        }
+        while let Some(reference) = commit.as_ref() {
+            for (k, v) in &reference.changes {
+                if k.len() >= start.len() + end.len() && k.starts_with(start) && k.ends_with(end) {
+                    callback(k, v);
+                }
+            }
+            commit = reference.prev;
+        }
+    }
+}
+
+impl<'a> Snapshot<'a> {
+    pub fn len(&self, key: &[u8]) -> u32 {
+        self.commit.map(|x| x.len(key)).unwrap_or(0)
+    }
+    pub fn read(&self, key: &[u8]) -> &'a [u8] {
+        self.commit.map(|x| x.read(key)).unwrap_or(&[])
+    }
+    pub fn count(&self, start: &[u8], end: &[u8]) -> u32 {
+        self.commit.map(|x| x.count(start, end)).unwrap_or(0)
+    }
+    pub fn list(&self, start: &[u8], end: &[u8]) -> Vec<&'a [u8]> {
+        self.commit
+            .map(|x| x.list(start, end))
+            .unwrap_or_else(Vec::new)
+    }
+    pub fn scan(&self, start: &[u8], end: &[u8]) -> Vec<(&'a [u8], &'a [u8])> {
+        self.commit
+            .map(|x| x.scan(start, end))
+            .unwrap_or_else(Vec::new)
+    }
 }
 
 impl<'a> Transaction<'a> {
-    pub fn len<'b>(&'b mut self, key: &[u8]) -> u32 {
+    pub fn len(&mut self, key: &[u8]) -> u32 {
+        if key.is_empty() {
+            return 0;
+        }
         self.read(key).len() as u32
     }
     pub fn read<'b>(&'b mut self, key: &[u8]) -> &'b [u8] {
-        if let Some(value) = self.changes.get(key) {
+        if key.is_empty() {
+            return &[];
+        }
+        if let Some(value) = self.commit.changes.get(key) {
             return value;
         }
         self.reads.insert(key.to_vec());
-        unsafe { Commit::read_key(self.snapshot, key) }
+        unsafe { Commit::ptr_read(self.commit.prev, key) }
     }
+
+    pub fn count(&mut self, start: &[u8], end: &[u8]) -> u32 {
+        self.register_scan(start, end);
+        unsafe { Commit::ptr_count(&self.commit, start, end) }
+    }
+    pub fn list<'b>(&'b mut self, start: &[u8], end: &[u8]) -> Vec<&'b [u8]> {
+        self.register_scan(start, end);
+        unsafe { Commit::ptr_list(&self.commit, start, end) }
+    }
+    pub fn scan<'b>(&'b mut self, start: &[u8], end: &[u8]) -> Vec<(&'b [u8], &'b [u8])> {
+        self.register_scan(start, end);
+        unsafe { Commit::ptr_scan(&self.commit, start, end) }
+    }
+    fn register_scan(&mut self, start: &[u8], end: &[u8]) {
+        if start
+            .len()
+            .checked_add(end.len())
+            .is_some_and(|x| x <= u32::MAX as usize)
+        {
+            let bytes = start
+                .iter()
+                .copied()
+                .chain(end.iter().copied())
+                .collect::<Box<[u8]>>();
+            self.scans.insert((bytes.into_vec(), start.len()));
+        }
+    }
+
     pub fn write(&mut self, key: &[u8], value: &[u8]) {
+        if key.is_empty() {
+            return;
+        }
         assert!(key.len() <= u32::MAX as usize);
         assert!(value.len() <= u32::MAX as usize);
-        self.changes.insert(key.to_vec(), value.to_vec());
+        self.commit.changes.insert(key.to_vec(), value.to_vec());
     }
     pub fn commit(self) -> Result<(), TransactionError> {
         let Transaction {
             database,
-            snapshot: mut known_master,
+            commit:
+                Commit {
+                    prev: mut known_master,
+                    changes,
+                },
             reads,
-            changes,
+            scans,
         } = self;
         let commit_ptr = Box::into_raw(Box::new(Commit {
             prev: known_master,
@@ -289,17 +468,25 @@ impl<'a> Transaction<'a> {
                 Err(new_master) => {
                     let commit = unsafe { commit_ptr.as_mut().unwrap_unchecked() };
                     let mut new_changes = new_master as *const Commit;
-                    unsafe {
-                        while let Some(reference) = new_changes.as_ref() {
-                            for key in &reads {
-                                if reference.changes.get(key).is_some() {
+                    while let Some(reference) = unsafe { new_changes.as_ref() } {
+                        for key in &reads {
+                            if reference.changes.get(key).is_some() {
+                                return Err(TransactionError::Conflict);
+                            }
+                        }
+                        for (key, _) in &reference.changes {
+                            for (start_end, start_len) in &scans {
+                                if key.len() >= start_end.len()
+                                    && key.starts_with(&start_end[..*start_len])
+                                    && key.ends_with(&start_end[*start_len..])
+                                {
                                     return Err(TransactionError::Conflict);
                                 }
                             }
-                            new_changes = reference.prev;
-                            if new_changes == known_master {
-                                break;
-                            }
+                        }
+                        new_changes = reference.prev;
+                        if new_changes == known_master {
+                            break;
                         }
                     }
                     known_master = new_master;
@@ -311,14 +498,5 @@ impl<'a> Transaction<'a> {
     }
     pub fn rollback(self) {
         drop(self)
-    }
-}
-
-impl<'a> ReadOnlyTransaction<'a> {
-    pub fn len(&self, key: &[u8]) -> u32 {
-        self.read(key).len() as u32
-    }
-    pub fn read(&self, key: &[u8]) -> &'a [u8] {
-        unsafe { Commit::read_key(self.snapshot, key) }
     }
 }

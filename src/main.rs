@@ -8,8 +8,27 @@ fn main() -> Result<(), std::io::Error> {
         client::stress()?;
     } else if arg == "serve" {
         server::serve()?;
+    } else if arg == "local" {
+        local()?;
     } else {
         client::client()?;
+    }
+    Ok(())
+}
+
+fn local() -> Result<(), std::io::Error> {
+    let db = pathkvs_core::Database::open("data.pathkvs")?;
+    for _ in 0..500 {
+        let mut tr = db.start_writes();
+        let inc = tr.read(b"INC");
+        let inc = if inc.is_empty() {
+            0
+        } else {
+            std::str::from_utf8(inc).unwrap().parse().unwrap()
+        };
+        let inc = inc + 1;
+        tr.write(b"INC", format!("{inc}").as_bytes());
+        tr.commit()?;
     }
     Ok(())
 }

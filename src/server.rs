@@ -83,4 +83,43 @@ impl pathkvs_net::server::Server for Server {
         }
         Ok(())
     }
+
+    fn count(&mut self, start: &[u8], end: &[u8]) -> Result<u32, Error> {
+        match &mut self.tr {
+            Some(tr) => Ok(tr.count(start, end)),
+            None => Ok(self.db.count(start, end)),
+        }
+    }
+    fn list(
+        &mut self,
+        start: &[u8],
+        end: &[u8],
+        write: impl FnOnce(&[&[u8]]),
+    ) -> Result<(), Error> {
+        match &mut self.tr {
+            Some(tr) => {
+                write(&tr.list(start, end));
+            }
+            None => {
+                write(&self.db.list(start, end));
+            }
+        }
+        Ok(())
+    }
+    fn scan(
+        &mut self,
+        start: &[u8],
+        end: &[u8],
+        write: impl FnOnce(&[(&[u8], &[u8])]),
+    ) -> Result<(), Error> {
+        match &mut self.tr {
+            Some(tr) => {
+                write(&tr.scan(start, end));
+            }
+            None => {
+                write(&self.db.scan(start, end));
+            }
+        }
+        Ok(())
+    }
 }

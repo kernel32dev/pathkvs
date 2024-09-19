@@ -10,15 +10,6 @@ use crate::{
     utils::{ReadEx, WriteEx},
 };
 
-pub enum Message {
-    Len { key: Vec<u8> },
-    Get { key: Vec<u8> },
-    Set { key_len: u32, key_value: Vec<u8> },
-    StartTransaction,
-    Commit,
-    Rollback,
-}
-
 pub trait Server {
     fn len(&mut self, key: &[u8]) -> Result<u32, Error>;
     fn read(&mut self, key: &[u8], write: impl FnOnce(&[u8])) -> Result<(), Error>;
@@ -26,6 +17,15 @@ pub trait Server {
     fn start_transaction(&mut self) -> Result<(), Error>;
     fn commit(&mut self) -> Result<Result<(), TransactionConflict>, Error>;
     fn rollback(&mut self) -> Result<(), Error>;
+    fn count(&mut self, start: &[u8], end: &[u8]) -> Result<u32, Error>;
+    fn list(&mut self, start: &[u8], end: &[u8], write: impl FnOnce(&[&[u8]]))
+        -> Result<(), Error>;
+    fn scan(
+        &mut self,
+        start: &[u8],
+        end: &[u8],
+        write: impl FnOnce(&[(&[u8], &[u8])]),
+    ) -> Result<(), Error>;
 
     fn max_len(&self) -> u32 {
         u32::MAX
@@ -58,35 +58,36 @@ where
                 stream.write_u8(message::LEN)?;
                 stream.write_u32(len)?;
             }
-            message::GET => {
+            message::READ => {
                 let max_len = server.max_len();
                 let key = stream.read_vec_lengthed(max_len)?;
                 let client_max_len = stream.read_u32()?;
-                let mut write_result = None;
+                let mut result = None;
                 server.read(&key, |bytes| {
-                    let result = if bytes.len() <= client_max_len as usize {
-                        stream
-                            .write_u8(message::GET)
-                            .and_then(|()| stream.write_vec_lengthed(bytes))
-                    } else {
-                        stream.write_u8(message::LIMIT_EXCEEDED)
-                    };
-                    write_result = Some(result);
+                    result = Some((|| {
+                        if bytes.len() <= client_max_len as usize {
+                            stream.write_u8(message::READ)?;
+                            stream.write_vec_lengthed(bytes)?;
+                        } else {
+                            stream.write_u8(message::LIMIT_EXCEEDED)?;
+                        }
+                        Ok::<_, Error>(())
+                    })());
                 })?;
-                match write_result {
+                match result {
                     Some(result) => result?,
                     None => {
-                        stream.write_u8(message::GET)?;
+                        stream.write_u8(message::READ)?;
                         stream.write_u32(0)?;
                     }
                 }
             }
-            message::SET => {
+            message::WRITE => {
                 let max_len = server.max_len();
                 let key = stream.read_vec_lengthed(max_len)?;
                 let value = stream.read_vec_lengthed(max_len)?;
                 server.write(&key, &value)?;
-                stream.write_u8(message::SET)?;
+                stream.write_u8(message::WRITE)?;
             }
             message::START_TRANSACTION => {
                 server.start_transaction()?;
@@ -103,6 +104,80 @@ where
             message::ROLLBACK => {
                 server.rollback()?;
                 stream.write_u8(message::ROLLBACK)?;
+            }
+            message::COUNT => {
+                let max_len = server.max_len();
+                let start = stream.read_vec_lengthed(max_len)?;
+                let end = stream.read_vec_lengthed(max_len)?;
+                let count = server.count(&start, &end)?;
+                stream.write_u8(message::COUNT)?;
+                stream.write_u32(count)?;
+            }
+            message::LIST => {
+                let max_len = server.max_len();
+                let start = stream.read_vec_lengthed(max_len)?;
+                let end = stream.read_vec_lengthed(max_len)?;
+                let client_max_len = stream.read_u32()?;
+                let mut result = None;
+                server.list(&start, &end, |list| {
+                    result = Some((|| {
+                        let total = list.iter().map(|x| x.len()).fold(Some(0usize), |acc, x| {
+                            acc.and_then(|acc| acc.checked_add(x))
+                        });
+                        if total.is_some_and(|x| x < client_max_len as usize) {
+                            stream.write_u8(message::LIST)?;
+                            stream.write_u32(list.len() as u32)?;
+                            for i in list {
+                                stream.write_vec_lengthed(i)?;
+                            }
+                        } else {
+                            stream.write_u8(message::LIMIT_EXCEEDED)?;
+                        }
+                        Ok::<_, Error>(())
+                    })());
+                })?;
+                match result {
+                    Some(result) => result?,
+                    None => {
+                        stream.write_u8(message::LIST)?;
+                        stream.write_u32(0)?;
+                    }
+                }
+            }
+            message::SCAN => {
+                let max_len = server.max_len();
+                let start = stream.read_vec_lengthed(max_len)?;
+                let end = stream.read_vec_lengthed(max_len)?;
+                let client_max_len = stream.read_u32()?;
+                let mut result = None;
+                server.scan(&start, &end, |scan| {
+                    result = Some((|| {
+                        let total = scan
+                            .iter()
+                            .flat_map(|(k, v)| [k.len(), v.len()])
+                            .fold(Some(0usize), |acc, x| {
+                                acc.and_then(|acc| acc.checked_add(x))
+                            });
+                        if total.is_some_and(|x| x < client_max_len as usize) {
+                            stream.write_u8(message::SCAN)?;
+                            stream.write_u32(scan.len() as u32)?;
+                            for (k, v) in scan {
+                                stream.write_vec_lengthed(k)?;
+                                stream.write_vec_lengthed(v)?;
+                            }
+                        } else {
+                            stream.write_u8(message::LIMIT_EXCEEDED)?;
+                        }
+                        Ok::<_, Error>(())
+                    })());
+                })?;
+                match result {
+                    Some(result) => result?,
+                    None => {
+                        stream.write_u8(message::SCAN)?;
+                        stream.write_u32(0)?;
+                    }
+                }
             }
             byte => {
                 dbg!(byte);

@@ -23,6 +23,9 @@ where
     }
     pub fn len(&mut self, key: impl AsRef<[u8]>) -> Result<u32, Error> {
         let key = key.as_ref();
+        if key.is_empty() {
+            return Ok(0);
+        }
         assert!(key.len() <= u32::MAX as usize);
         self.conn.write_u8(message::LEN)?;
         self.conn.write_u32(key.len() as u32)?;
@@ -50,14 +53,17 @@ where
         max_len: u32,
     ) -> Result<Option<Vec<u8>>, Error> {
         let key = key.as_ref();
+        if key.is_empty() {
+            return Ok(Some(Vec::new()));
+        }
         assert!(key.len() <= u32::MAX as usize);
-        self.conn.write_u8(message::GET)?;
+        self.conn.write_u8(message::READ)?;
         self.conn.write_u32(key.len() as u32)?;
         self.conn.write_all(key)?;
         self.conn.write_u32(max_len)?;
         self.conn.flush()?;
         match self.conn.read_u8()? {
-            message::GET => {
+            message::READ => {
                 let recv_len = self.conn.read_u32()?;
                 if recv_len <= max_len {
                     self.conn.read_vec(recv_len as usize).map(Some)
@@ -71,16 +77,19 @@ where
     }
     pub fn write(&mut self, key: impl AsRef<[u8]>, value: impl AsRef<[u8]>) -> Result<(), Error> {
         let key = key.as_ref();
+        if key.is_empty() {
+            return Ok(());
+        }
         let value = value.as_ref();
         assert!(key.len() <= u32::MAX as usize);
         assert!(value.len() <= u32::MAX as usize);
-        self.conn.write_u8(message::SET)?;
+        self.conn.write_u8(message::WRITE)?;
         self.conn.write_u32(key.len() as u32)?;
         self.conn.write_all(key)?;
         self.conn.write_u32(value.len() as u32)?;
         self.conn.write_all(value)?;
         self.conn.flush()?;
-        if self.conn.read_u8()? != message::SET {
+        if self.conn.read_u8()? != message::WRITE {
             return Err(ProtocolError.into());
         }
         Ok(())
@@ -109,6 +118,156 @@ where
             return Err(ProtocolError.into());
         }
         Ok(())
+    }
+    pub fn count(&mut self, start: impl AsRef<[u8]>, end: impl AsRef<[u8]>) -> Result<u32, Error> {
+        let start = start.as_ref();
+        let end = end.as_ref();
+        assert!(start
+            .len()
+            .checked_add(end.len())
+            .is_some_and(|x| x <= u32::MAX as usize));
+        self.conn.write_u8(message::COUNT)?;
+        self.conn.write_u32(start.len() as u32)?;
+        self.conn.write_all(start)?;
+        self.conn.write_u32(end.len() as u32)?;
+        self.conn.write_all(end)?;
+        self.conn.flush()?;
+        if self.conn.read_u8()? != message::COUNT {
+            return Err(ProtocolError.into());
+        }
+        self.conn.read_u32()
+    }
+    pub fn list(
+        &mut self,
+        start: impl AsRef<[u8]>,
+        end: impl AsRef<[u8]>,
+    ) -> Result<Vec<Vec<u8>>, Error> {
+        let start = start.as_ref();
+        let end = end.as_ref();
+        self.list_limited(start, end, u32::MAX)
+    }
+    pub fn list_limited(
+        &mut self,
+        start: impl AsRef<[u8]>,
+        end: impl AsRef<[u8]>,
+        max_len: u32,
+    ) -> Result<Vec<Vec<u8>>, Error> {
+        let start = start.as_ref();
+        let end = end.as_ref();
+        match self.list_limited_opt(start, end, max_len).transpose() {
+            Some(result) => result,
+            None => Err(LimitExceeded.into()),
+        }
+    }
+    pub fn list_limited_opt(
+        &mut self,
+        start: impl AsRef<[u8]>,
+        end: impl AsRef<[u8]>,
+        max_len: u32,
+    ) -> Result<Option<Vec<Vec<u8>>>, Error> {
+        let start = start.as_ref();
+        let end = end.as_ref();
+        assert!(start
+            .len()
+            .checked_add(end.len())
+            .is_some_and(|x| x <= u32::MAX as usize));
+        self.conn.write_u8(message::LIST)?;
+        self.conn.write_u32(start.len() as u32)?;
+        self.conn.write_all(start)?;
+        self.conn.write_u32(end.len() as u32)?;
+        self.conn.write_all(end)?;
+        self.conn.write_u32(max_len)?;
+        self.conn.flush()?;
+        match self.conn.read_u8()? {
+            message::LIST => {
+                let mut total = Some(0u32);
+                let mut rows = Vec::new();
+                let rowc = self.conn.read_u32()?;
+                rows.reserve_exact(rowc as usize);
+                for _ in 0..rowc {
+                    let recv_len = self.conn.read_u32()?;
+                    total = total.and_then(|x| x.checked_add(recv_len));
+                    if total.is_some_and(|total| total <= max_len) {
+                        rows.push(self.conn.read_vec(recv_len as usize)?);
+                    } else {
+                        return Err(ProtocolError.into());
+                    }
+                }
+                Ok(Some(rows))
+            }
+            message::LIMIT_EXCEEDED => Ok(None),
+            _ => Err(ProtocolError.into()),
+        }
+    }
+    pub fn scan(
+        &mut self,
+        start: impl AsRef<[u8]>,
+        end: impl AsRef<[u8]>,
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, Error> {
+        let start = start.as_ref();
+        let end = end.as_ref();
+        self.scan_limited(start, end, u32::MAX)
+    }
+    pub fn scan_limited(
+        &mut self,
+        start: impl AsRef<[u8]>,
+        end: impl AsRef<[u8]>,
+        max_len: u32,
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, Error> {
+        let start = start.as_ref();
+        let end = end.as_ref();
+        match self.scan_limited_opt(start, end, max_len).transpose() {
+            Some(result) => result,
+            None => Err(LimitExceeded.into()),
+        }
+    }
+    pub fn scan_limited_opt(
+        &mut self,
+        start: impl AsRef<[u8]>,
+        end: impl AsRef<[u8]>,
+        max_len: u32,
+    ) -> Result<Option<Vec<(Vec<u8>, Vec<u8>)>>, Error> {
+        let start = start.as_ref();
+        let end = end.as_ref();
+        assert!(start
+            .len()
+            .checked_add(end.len())
+            .is_some_and(|x| x <= u32::MAX as usize));
+        self.conn.write_u8(message::SCAN)?;
+        self.conn.write_u32(start.len() as u32)?;
+        self.conn.write_all(start)?;
+        self.conn.write_u32(end.len() as u32)?;
+        self.conn.write_all(end)?;
+        self.conn.write_u32(max_len)?;
+        self.conn.flush()?;
+        match self.conn.read_u8()? {
+            message::SCAN => {
+                let mut total = Some(0u32);
+                let mut rows = Vec::new();
+                let rowc = self.conn.read_u32()?;
+                rows.reserve_exact(rowc as usize);
+                for _ in 0..rowc {
+                    let recv_len = self.conn.read_u32()?;
+                    total = total.and_then(|x| x.checked_add(recv_len));
+                    if !total.is_some_and(|total| total <= max_len) {
+                        return Err(ProtocolError.into());
+                    }
+                    let key = self.conn.read_vec(recv_len as usize)?;
+
+                    let recv_len = self.conn.read_u32()?;
+                    total = total.and_then(|x| x.checked_add(recv_len));
+                    if !total.is_some_and(|total| total <= max_len) {
+                        return Err(ProtocolError.into());
+                    }
+                    let value = self.conn.read_vec(recv_len as usize)?;
+
+                    rows.push((key, value));
+                }
+                Ok(Some(rows))
+            }
+            message::LIMIT_EXCEEDED => Ok(None),
+            _ => Err(ProtocolError.into()),
+        }
     }
 
     pub fn read_str(&mut self, key: impl AsRef<[u8]>) -> Result<String, Error> {

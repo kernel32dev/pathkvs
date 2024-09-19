@@ -20,8 +20,34 @@ pub fn client() -> Result<(), std::io::Error> {
         let line = line?;
         match line.split_once('=') {
             Some((key, value)) => {
-                write_count += 1;
-                conn.write(key.as_bytes(), value.as_bytes())?;
+                match key.split_once('*') {
+                    Some((start, end)) if value.is_empty() => {
+                        let scan = conn.scan(start.as_bytes(), end.as_bytes())?;
+                        read_count += scan.len();
+                        match scan.as_slice() {
+                            [] => {
+                                println!("{RETURN}scan: no matches for \"{}\"", key);
+                            }
+                            [(k, v)] => {
+                                println!("{RETURN}scan: 1 match for \"{}\"", key);
+                                println!("{}={}", k.display(), v.display());
+                            }
+                            scan => {
+                                println!("{RETURN}scan: {} matches for \"{}\"", scan.len(), key);
+                                for (k, v) in scan {
+                                    println!("{}={}", k.display(), v.display());
+                                }
+                            }
+                        }
+                    }
+                    Some(_) => {
+                        println!("{RETURN}error: can't assign to scan");
+                    }
+                    None => {
+                        write_count += 1;
+                        conn.write(key.as_bytes(), value.as_bytes())?;
+                    }
+                }
                 continue;
             }
             None => {}
@@ -54,9 +80,32 @@ pub fn client() -> Result<(), std::io::Error> {
                 conn.rollback()?;
                 conn.start_transaction()?;
             }
-            key => {
+            pattern => {
                 read_count += 1;
-                println!("{RETURN}{}={}", key, conn.read(key.as_bytes())?.display());
+                match pattern.split_once('*') {
+                    Some((start, end)) => {
+                        let list = conn.list(start.as_bytes(), end.as_bytes())?;
+                        read_count += list.len();
+                        match list.as_slice() {
+                            [] => {
+                                println!("{RETURN}list: no matches for \"{}\"", pattern);
+                            }
+                            [key] => {
+                                println!("{RETURN}list: 1 match for \"{}\"", pattern);
+                                println!("{}", key.display());
+                            }
+                            list => {
+                                println!("{RETURN}list: {} matches for \"{}\"", list.len(), pattern);
+                                for key in list {
+                                    println!("{}", key.display());
+                                }
+                            }
+                        }
+                    }
+                    None => {
+                        println!("{RETURN}{}={}", pattern, conn.read(pattern.as_bytes())?.display());
+                    }
+                }
             }
         }
     }
