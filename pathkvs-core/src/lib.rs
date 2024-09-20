@@ -7,6 +7,7 @@ use std::{
         atomic::{AtomicPtr, Ordering},
         Mutex,
     },
+    time::{Duration, SystemTime},
 };
 
 use error::TransactionError;
@@ -35,6 +36,7 @@ struct HistorySink {
 #[derive(Clone)]
 struct Commit {
     prev: *const Commit,
+    time: Duration,
     changes: HashMap<Vec<u8>, Vec<u8>>,
 }
 
@@ -75,17 +77,32 @@ impl Database {
             .create(true)
             .open(path)?;
 
-        let mut changes = HashMap::new();
         let mut cursor = 0u64;
+        let mut commit_ptr = std::ptr::null_mut();
 
         let result: Result<(), Error> = (|| loop {
-            let mut commit_changes = Vec::new();
             let mut commit_cursor = 0u64;
+
+            let mut seconds = [0; 8];
+            let mut nanoseconds = [0; 4];
+            file.read_exact(&mut seconds)?;
+            file.read_exact(&mut nanoseconds)?;
+            commit_cursor += 12;
+            let seconds = u64::from_le_bytes(seconds);
+            let nanoseconds = u32::from_le_bytes(nanoseconds);
+
+            if nanoseconds >= 1_000_000_000 {
+                todo!();
+            }
 
             let mut kv_len = [0; 4];
             file.read_exact(&mut kv_len)?;
             commit_cursor += 4;
             let kv_len = u32::from_le_bytes(kv_len);
+
+            let time = Duration::new(seconds, nanoseconds);
+
+            let mut changes = HashMap::new();
 
             for _ in 0..kv_len {
                 let mut k_len = [0; 4];
@@ -114,10 +131,15 @@ impl Database {
                 file.read_exact(&mut v)?;
                 commit_cursor += v_len as u64;
 
-                commit_changes.push((k, v));
+                changes.insert(k, v);
             }
 
-            changes.extend(commit_changes);
+            commit_ptr = Box::into_raw(Box::new(Commit {
+                prev: commit_ptr,
+                time,
+                changes,
+            }));
+
             cursor += commit_cursor;
         })();
 
@@ -128,11 +150,6 @@ impl Database {
         }
 
         file.set_len(cursor)?;
-
-        let commit_ptr = Box::into_raw(Box::new(Commit {
-            prev: std::ptr::null(),
-            changes,
-        }));
 
         Ok(Self {
             resolved_master: AtomicPtr::new(commit_ptr),
@@ -148,6 +165,7 @@ impl Database {
             database: self,
             commit: Commit {
                 prev: self.serialized_master.load(Ordering::SeqCst),
+                time: Duration::default(),
                 changes: HashMap::new(),
             },
             reads: HashSet::new(),
@@ -161,7 +179,7 @@ impl Database {
         let mut ts = self.start_writes();
         ts.write(key, value);
         match ts.commit() {
-            Ok(()) => Ok(()),
+            Ok(_) => Ok(()),
             Err(TransactionError::Conflict) => {
                 unreachable!("a write only transaction cannot conflict")
             }
@@ -174,6 +192,26 @@ impl Database {
                 commit: self.serialized_master.load(Ordering::SeqCst).as_ref(),
             }
         }
+    }
+    pub fn past_unix_time_snapshot_with<'a>(&'a self, time: Duration) -> Snapshot<'a> {
+        let mut commit = self.serialized_master.load(Ordering::SeqCst) as *const Commit;
+        unsafe {
+            while let Some(reference) = commit.as_ref() {
+                if reference.time <= time {
+                    return Snapshot {
+                        commit: Some(reference),
+                    };
+                }
+                commit = reference.prev;
+            }
+        }
+        Snapshot { commit: None }
+    }
+    pub fn past_sys_time_snapshot<'a>(&'a self, time: SystemTime) -> Snapshot<'a> {
+        let Ok(time) = time.duration_since(SystemTime::UNIX_EPOCH) else {
+            return Snapshot { commit: None };
+        };
+        self.past_unix_time_snapshot_with(time)
     }
     pub fn len<'b>(&'b self, key: &[u8]) -> u32 {
         if key.is_empty() {
@@ -220,9 +258,17 @@ impl Database {
                 let mut new_cursor = workbench.cursor;
                 workbench.output_stream.seek(SeekFrom::Start(new_cursor))?;
                 workbench.output_stream.set_len(new_cursor)?;
+
+                let seconds = commit_ref.time.as_secs().to_le_bytes();
+                let nanoseconds = commit_ref.time.subsec_nanos().to_le_bytes();
+                workbench.output_stream.write_all(&seconds)?;
+                workbench.output_stream.write_all(&nanoseconds)?;
+                new_cursor += 12;
+
                 let kv_len_bytes = (commit_ref.changes.len() as u32).to_le_bytes();
                 workbench.output_stream.write_all(&kv_len_bytes)?;
                 new_cursor += 4;
+
                 for (k, v) in &commit_ref.changes {
                     let k_len_bytes = (k.len() as u32).to_le_bytes();
                     workbench.output_stream.write_all(&k_len_bytes)?;
@@ -439,19 +485,23 @@ impl<'a> Transaction<'a> {
         assert!(value.len() <= u32::MAX as usize);
         self.commit.changes.insert(key.to_vec(), value.to_vec());
     }
-    pub fn commit(self) -> Result<(), TransactionError> {
+    pub fn commit(self) -> Result<Duration, TransactionError> {
+        // TODO! don't commit empty commits
         let Transaction {
             database,
             commit:
                 Commit {
                     prev: mut known_master,
+                    time: _,
                     changes,
                 },
             reads,
             scans,
         } = self;
+        let mut time = now_since_epoch();
         let commit_ptr = Box::into_raw(Box::new(Commit {
             prev: known_master,
+            time,
             changes,
         }));
         loop {
@@ -489,14 +539,23 @@ impl<'a> Transaction<'a> {
                             break;
                         }
                     }
+                    time = now_since_epoch();
                     known_master = new_master;
+                    commit.time = time;
                     commit.prev = new_master;
                 }
             }
         }
-        self.database.persist().map_err(TransactionError::Io)
+        self.database.persist().map_err(TransactionError::Io)?;
+        Ok(time)
     }
     pub fn rollback(self) {
         drop(self)
     }
+}
+
+fn now_since_epoch() -> Duration {
+    std::time::SystemTime::now()
+        .duration_since(std::time::SystemTime::UNIX_EPOCH)
+        .expect("system time must be after UNIX_EPOCH")
 }

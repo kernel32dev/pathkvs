@@ -1,4 +1,7 @@
-use std::io::{Error, ErrorKind, Read, Write};
+use std::{
+    io::{Error, ErrorKind, Read, Write},
+    time::SystemTime,
+};
 
 use pathkvs_core::error::{LimitExceeded, ProtocolError, TransactionError};
 
@@ -7,8 +10,28 @@ use crate::{
     utils::{ReadEx, WriteEx},
 };
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConnectionMode {
+    Normal,
+    Transaction,
+    Snapshot,
+}
+
+impl ConnectionMode {
+    pub const fn is_normal(self) -> bool {
+        matches!(self, Self::Normal)
+    }
+    pub const fn is_transaction(self) -> bool {
+        matches!(self, Self::Transaction)
+    }
+    pub const fn is_snapshot(self) -> bool {
+        matches!(self, Self::Snapshot)
+    }
+}
+
 pub struct Connection<T> {
     conn: T,
+    mode: ConnectionMode,
 }
 
 impl<T> Connection<T>
@@ -16,10 +39,16 @@ where
     T: Read + Write,
 {
     pub fn new(inner: T) -> Self {
-        Self { conn: inner }
+        Self {
+            conn: inner,
+            mode: ConnectionMode::Normal,
+        }
     }
     pub fn get_inner(&mut self) -> &mut T {
         &mut self.conn
+    }
+    pub fn mode(&self) -> ConnectionMode {
+        self.mode
     }
     pub fn len(&mut self, key: impl AsRef<[u8]>) -> Result<u32, Error> {
         let key = key.as_ref();
@@ -76,6 +105,9 @@ where
         }
     }
     pub fn write(&mut self, key: impl AsRef<[u8]>, value: impl AsRef<[u8]>) -> Result<(), Error> {
+        if self.mode == ConnectionMode::Snapshot {
+            panic!("pathks client: can't write to a snapshot");
+        }
         let key = key.as_ref();
         if key.is_empty() {
             return Ok(());
@@ -100,13 +132,19 @@ where
         if self.conn.read_u8()? != message::START_TRANSACTION {
             return Err(ProtocolError.into());
         }
+        self.mode = ConnectionMode::Transaction;
         Ok(())
     }
-    pub fn commit(&mut self) -> Result<(), TransactionError> {
+    pub fn commit(&mut self) -> Result<Option<SystemTime>, TransactionError> {
         self.conn.write_u8(message::COMMIT)?;
         self.conn.flush()?;
         match self.conn.read_u8()? {
-            message::COMMIT => Ok(()),
+            message::COMMIT => {
+                let duration = self.conn.read_duration()?;
+                self.mode = ConnectionMode::Normal;
+                Ok((!duration.is_zero())
+                    .then(|| SystemTime::UNIX_EPOCH.checked_add(duration).unwrap()))
+            }
             message::CONFLICT => Err(TransactionError::Conflict),
             _ => Err(TransactionError::Io(ProtocolError.into())),
         }
@@ -117,6 +155,7 @@ where
         if self.conn.read_u8()? != message::ROLLBACK {
             return Err(ProtocolError.into());
         }
+        self.mode = ConnectionMode::Normal;
         Ok(())
     }
     pub fn count(&mut self, start: impl AsRef<[u8]>, end: impl AsRef<[u8]>) -> Result<u32, Error> {
@@ -268,6 +307,23 @@ where
             message::LIMIT_EXCEEDED => Ok(None),
             _ => Err(ProtocolError.into()),
         }
+    }
+    pub fn start_snapshot(&mut self, prev_time: Option<SystemTime>) -> Result<(), Error> {
+        self.conn.write_u8(message::START_SNAPSHOT)?;
+        self.conn.write_duration(
+            prev_time
+                .map(|x| {
+                    x.duration_since(SystemTime::UNIX_EPOCH)
+                        .expect("prev_time must be after the unix epoch")
+                })
+                .unwrap_or_default(),
+        )?;
+        self.conn.flush()?;
+        if self.conn.read_u8()? != message::START_SNAPSHOT {
+            return Err(ProtocolError.into());
+        }
+        self.mode = ConnectionMode::Snapshot;
+        Ok(())
     }
 
     pub fn read_str(&mut self, key: impl AsRef<[u8]>) -> Result<String, Error> {

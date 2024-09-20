@@ -1,6 +1,7 @@
 use std::{
     convert::Infallible,
     io::{Error, ErrorKind, Read, Write},
+    time::Duration,
 };
 
 use pathkvs_core::error::{ProtocolError, TransactionConflict};
@@ -15,7 +16,7 @@ pub trait Server {
     fn read(&mut self, key: &[u8], write: impl FnOnce(&[u8])) -> Result<(), Error>;
     fn write(&mut self, key: &[u8], value: &[u8]) -> Result<(), Error>;
     fn start_transaction(&mut self) -> Result<(), Error>;
-    fn commit(&mut self) -> Result<Result<(), TransactionConflict>, Error>;
+    fn commit(&mut self) -> Result<Result<Option<Duration>, TransactionConflict>, Error>;
     fn rollback(&mut self) -> Result<(), Error>;
     fn count(&mut self, start: &[u8], end: &[u8]) -> Result<u32, Error>;
     fn list(&mut self, start: &[u8], end: &[u8], write: impl FnOnce(&[&[u8]]))
@@ -26,6 +27,7 @@ pub trait Server {
         end: &[u8],
         write: impl FnOnce(&[(&[u8], &[u8])]),
     ) -> Result<(), Error>;
+    fn start_snapshot(&mut self, past_unix_time: Option<Duration>) -> Result<(), Error>;
 
     fn max_len(&self) -> u32 {
         u32::MAX
@@ -47,6 +49,7 @@ fn serve_indefinite<T>(stream: &mut T, server: &mut impl Server) -> Result<Infal
 where
     T: Read + Write,
 {
+    let mut readonly = false;
     loop {
         let mut recv_command = [0];
         stream.read_exact(&mut recv_command)?;
@@ -83,6 +86,9 @@ where
                 }
             }
             message::WRITE => {
+                if readonly {
+                    return Err(ProtocolError.into());
+                }
                 let max_len = server.max_len();
                 let key = stream.read_vec_lengthed(max_len)?;
                 let value = stream.read_vec_lengthed(max_len)?;
@@ -92,10 +98,17 @@ where
             message::START_TRANSACTION => {
                 server.start_transaction()?;
                 stream.write_u8(message::START_TRANSACTION)?;
+                readonly = false;
+            }
+            message::COMMIT if readonly => {
+                server.rollback()?;
+                stream.write_u8(message::COMMIT)?;
+                stream.write_duration(Duration::default())?;
             }
             message::COMMIT => match server.commit()? {
-                Ok(()) => {
+                Ok(duration) => {
                     stream.write_u8(message::COMMIT)?;
+                    stream.write_duration(duration.unwrap_or_default())?;
                 }
                 Err(TransactionConflict) => {
                     stream.write_u8(message::CONFLICT)?;
@@ -178,6 +191,13 @@ where
                         stream.write_u32(0)?;
                     }
                 }
+            }
+            message::START_SNAPSHOT => {
+                let duration = stream.read_duration()?;
+                let duration = (!duration.is_zero()).then_some(duration);
+                server.start_snapshot(duration)?;
+                stream.write_u8(message::START_SNAPSHOT)?;
+                readonly = true;
             }
             byte => {
                 dbg!(byte);

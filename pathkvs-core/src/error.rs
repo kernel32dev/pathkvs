@@ -79,12 +79,14 @@ impl From<TransactionError> for Error {
 }
 
 pub trait TransposeConflict {
-    fn transpose_conflict(self) -> Result<Result<(), TransactionConflict>, Error>;
+    type Output;
+    fn transpose_conflict(self) -> Result<Result<Self::Output, TransactionConflict>, Error>;
 }
-impl TransposeConflict for Result<(), TransactionError> {
-    fn transpose_conflict(self) -> Result<Result<(), TransactionConflict>, Error> {
+impl<T> TransposeConflict for Result<T, TransactionError> {
+    type Output = T;
+    fn transpose_conflict(self) -> Result<Result<Self::Output, TransactionConflict>, Error> {
         match self {
-            Ok(()) => Ok(Ok(())),
+            Ok(x) => Ok(Ok(x)),
             Err(TransactionError::Conflict) => Ok(Err(TransactionConflict)),
             Err(TransactionError::Io(error)) => Err(error),
         }

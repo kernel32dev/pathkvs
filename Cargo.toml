@@ -1,8 +1,9 @@
 [package]
-name = "pathkvs-test"
+name = "pathkvs-bin"
 version = "0.0.0"
 edition = "2021"
 
 [dependencies]
+chrono = "0.4.38"
 pathkvs-core = { path = "pathkvs-core" }
 pathkvs-net = { path = "pathkvs-net" }

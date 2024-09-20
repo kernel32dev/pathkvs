@@ -7,15 +7,33 @@
         {
             "type": "lldb",
             "request": "launch",
-            "name": "Debug executable 'pathkvs-test'",
+            "name": "Debug server 'pathkvs-bin'",
             "cargo": {
                 "args": [
                     "build",
-                    "--bin=pathkvs-test",
-                    "--package=pathkvs-test"
+                    "--bin=pathkvs-bin",
+                    "--package=pathkvs-bin"
                 ],
                 "filter": {
-                    "name": "pathkvs-test",
+                    "name": "pathkvs-bin",
+                    "kind": "bin"
+                }
+            },
+            "args": ["serve"],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug client 'pathkvs-bin'",
+            "cargo": {
+                "args": [
+                    "build",
+                    "--bin=pathkvs-bin",
+                    "--package=pathkvs-bin"
+                ],
+                "filter": {
+                    "name": "pathkvs-bin",
                     "kind": "bin"
                 }
             },
@@ -25,16 +43,16 @@
         {
             "type": "lldb",
             "request": "launch",
-            "name": "Debug unit tests in executable 'pathkvs-test'",
+            "name": "Debug unit tests in executable 'pathkvs-bin'",
             "cargo": {
                 "args": [
                     "test",
                     "--no-run",
-                    "--bin=pathkvs-test",
-                    "--package=pathkvs-test"
+                    "--bin=pathkvs-bin",
+                    "--package=pathkvs-bin"
                 ],
                 "filter": {
-                    "name": "pathkvs-test",
+                    "name": "pathkvs-bin",
                     "kind": "bin"
                 }
             },

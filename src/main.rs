@@ -5,7 +5,8 @@ mod server;
 fn main() -> Result<(), std::io::Error> {
     let arg = std::env::args().nth(1).unwrap_or_default();
     if arg == "stress" {
-        client::stress()?;
+        let count = std::env::args().nth(2).and_then(|x| x.parse().ok()).unwrap_or(500);
+        client::stress(count)?;
     } else if arg == "serve" {
         server::serve()?;
     } else if arg == "local" {

@@ -25,28 +25,31 @@ tente executar `cargo run stress` multiplas vezes para ver eles lutando entre si
 
 depois execute `cargo run`, e então digite `INC` e então aperte `Enter`, para ver o valor da variável `INC`
 
-## Comandos do terminal interatico
+## Comandos do terminal interativo
 1. `<chave>=<valor>` - salvar um valor no banco
 2. `<chave>` - ler o valor da chave
 3. `<comeco>*<fim>` - listar todas as chaves que começam com `<comeco>` e terminam com `<fim>`
 3. `<comeco>*<fim>=` - mesma coisa que o comando acima, mas também mostra o valor
-4. `commit` - comitar as mudanças
-5. `rollback` - desfazer as mudanças
-6. Ctrl + C - encerrar o programa
+4. `start` - começar uma transação
+5. `commit` - comitar as mudanças
+6. `rollback` - desfazer as mudanças
+7. `snap YYYY-MM-DD HH:MM:SS` - ver como o banco estava no passado
+8. `snap -1d` - ver como o banco estava há 24 horas atrás
+9. `exit` ou Ctrl + C - encerrar o programa
 
-### Performance
+## Performance
 é terrível, em uma máquina boa, mais ou menos 40ms por transação, 25 transações por segundo
 
 isso é por causa da necessidade de sincronizar com o disco
 
-### Features e caracteristicas
+## Features e caracteristicas
 * suporta apenas isolamento serializável, que o nível mais alto que tem em bancos de dados
+* guarda todo o histórico de mudanças, consegue voltar no tempo e fazer queries no passado
 * têm um protocolo tcp/ip simples
 * usa exclusivamente operações atomicas para resolver conflitos
-* usa apenas um mutex para proteger a serialização do arquivo
-* guarda todo o histórico de mudanças
-* não é possível diminuir o tamanho do banco
 * não suporta esperas na leitura, não é possível esperar até que um recurso esteja "liberado" (isso é uma grande limitação)
+* usa apenas um mutex para proteger a serialização do arquivo
+* não é possível diminuir o tamanho do banco
 * não consegue ler do disco para evitar uso desnecessário de memória, todo o banco tem que caber na RAM
 * não tem índices
 
@@ -108,6 +111,6 @@ esse modelo, tem altíssima [contenção](https://en.wikipedia.org/wiki/Resource
 e um fato interessante é que nesse modelo um rollback, não dá trabalho nenhum, é só a thread esqueçer o ponteiro para o commit e as mudanças e leituras que estava rastreando
 
 ### Persistência
-o arquivo do banco de dados é um banco *append-only* que guarda todas as mudanças feitas no banco, se adicionarmos metadados aos commits como quem fez e quando fez (algo que a implementação hoje não faz), é possível voltar no tempo e fazer perguntas sobre como os dados estavam antes de um certo tempo, ou antes de uma certa mudança
+o arquivo do banco de dados é um banco *append-only* que guarda todas as mudanças feitas no banco, se adicionarmos metadados aos commits como quando foi feito, é possível voltar no tempo e fazer perguntas sobre como os dados estavam antes de um certo tempo
 
 isso também tem implicações quanto aos backups, que não seria necessário guardar múltiplos backups diários, pois isso iria estar guardando o histórico multiplas vezes no mesmo disco, seria melhor tem uma cópia em cada ponto de falha (discos), e apenas copiar o novo histórico para cada um, pois, se o que você quer é ver como o banco estava no passado, isso estaria presente no banco principal e não teria necessidade de apelar para backups

@@ -1,5 +1,8 @@
 use pathkvs_core::error::ProtocolError;
-use std::io::{Error, Read, Write};
+use std::{
+    io::{Error, Read, Write},
+    time::Duration,
+};
 
 pub trait ReadEx: Read {
     fn read_u8(&mut self) -> Result<u8, Error> {
@@ -26,6 +29,18 @@ pub trait ReadEx: Read {
         }
         self.read_vec(len as usize)
     }
+    fn read_duration(&mut self) -> Result<Duration, Error> {
+        let mut seconds = [0; 8];
+        self.read_exact(&mut seconds)?;
+        let seconds = u64::from_le_bytes(seconds);
+        let mut nanoseconds = [0; 4];
+        self.read_exact(&mut nanoseconds)?;
+        let nanoseconds = u32::from_le_bytes(nanoseconds);
+        if nanoseconds >= 1_000_000_000 {
+            return Err(ProtocolError.into());
+        }
+        Ok(Duration::new(seconds, nanoseconds))
+    }
 }
 impl<T: Read + ?Sized> ReadEx for T {}
 
@@ -41,6 +56,10 @@ pub trait WriteEx: Write {
         let len = bytes.len() as u32;
         self.write_u32(len)?;
         self.write_all(bytes)
+    }
+    fn write_duration(&mut self, duration: Duration) -> Result<(), Error> {
+        self.write_all(&u64::to_le_bytes(duration.as_secs()))?;
+        self.write_all(&u32::to_le_bytes(duration.subsec_nanos()))
     }
 }
 impl<T: Write + ?Sized> WriteEx for T {}
