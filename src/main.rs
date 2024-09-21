@@ -1,35 +1,58 @@
 mod client;
-mod fmt;
 mod server;
+mod utils;
 
-fn main() -> Result<(), std::io::Error> {
-    let arg = std::env::args().nth(1).unwrap_or_default();
-    if arg == "stress" {
-        let count = std::env::args().nth(2).and_then(|x| x.parse().ok()).unwrap_or(500);
-        client::stress(count)?;
-    } else if arg == "serve" {
-        server::serve()?;
-    } else if arg == "local" {
-        local()?;
-    } else {
-        client::client()?;
-    }
-    Ok(())
+use clap::{Parser, Subcommand};
+use pathkvs_core::DatabaseWriteSyncMode;
+
+#[derive(Parser)]
+#[command(name = "pathkvs", about = "Um banco chave valor")]
+struct Cli {
+    #[command(subcommand)]
+    command: Option<Commands>,
 }
 
-fn local() -> Result<(), std::io::Error> {
-    let db = pathkvs_core::Database::open("data.pathkvs")?;
-    for _ in 0..500 {
-        let mut tr = db.start_writes();
-        let inc = tr.read(b"INC");
-        let inc = if inc.is_empty() {
-            0
-        } else {
-            std::str::from_utf8(inc).unwrap().parse().unwrap()
-        };
-        let inc = inc + 1;
-        tr.write(b"INC", format!("{inc}").as_bytes());
-        tr.commit()?;
+#[derive(Subcommand)]
+enum Commands {
+    /// Serve o banco
+    Serve {
+        /// Caminho do banco de dados (opcional)
+        path: Option<String>,
+        /// Commits retornam quando os dados estiverem no disco
+        #[arg(short, long)]
+        sync: bool,
+        /// Commits retornam quando os sistema operacional obter a escrita
+        #[arg(short, long)]
+        flush: bool,
+        /// Commits retornam quando os conflitos forem resolvido
+        #[arg(short, long)]
+        cache: bool,
+    },
+}
+
+fn main() -> std::io::Result<()> {
+    let _ = ctrlc::set_handler(|| std::process::exit(0));
+    match Cli::parse().command {
+        Some(Commands::Serve {
+            path,
+            sync,
+            flush,
+            cache: cached,
+        }) => {
+            let mode = if sync {
+                DatabaseWriteSyncMode::Sync
+            } else if flush {
+                DatabaseWriteSyncMode::Flush
+            } else if cached {
+                DatabaseWriteSyncMode::Cached
+            } else {
+                DatabaseWriteSyncMode::Sync
+            };
+            server::serve(path, mode)?;
+        }
+        None => {
+            client::client()?;
+        }
     }
     Ok(())
 }

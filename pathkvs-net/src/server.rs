@@ -199,8 +199,7 @@ where
                 stream.write_u8(message::START_SNAPSHOT)?;
                 readonly = true;
             }
-            byte => {
-                dbg!(byte);
+            _ => {
                 return Err(ProtocolError.into());
             }
         }

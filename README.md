@@ -9,19 +9,10 @@ o acrónimo significa *Persitent Atomic Transacted Historical Key Value Store*
 
 ## Como executar
 
-primeito, tenha rust instalado, então:
+primeiro, tenha rust instalado, então:
 
 * execute `cargo run serve`, para rodar um servidor na porta 6314
-* execute `cargo run stress`, para incrementar a variável `INC` 500 vezes
-* execute `cargo run`, para ter um terminal interativo com o qual você pode rodar comandos
-
-## Testando o banco
-
-depois de ligar o servidor com `cargo run serve`
-
-tente executar `cargo run stress` multiplas vezes para ver eles lutando entre si tentando incrementar o `INC`
-
-`cargo run stress` vai relatar quando um commit falhar por causa de um conflito
+* execute `cargo run`, para ter um terminal interativo no qual você pode rodar comandos
 
 depois execute `cargo run`, e então digite `INC` e então aperte `Enter`, para ver o valor da variável `INC`
 
@@ -30,12 +21,13 @@ depois execute `cargo run`, e então digite `INC` e então aperte `Enter`, para 
 2. `<chave>` - ler o valor da chave
 3. `<comeco>*<fim>` - listar todas as chaves que começam com `<comeco>` e terminam com `<fim>`
 3. `<comeco>*<fim>=` - mesma coisa que o comando acima, mas também mostra o valor
-4. `start` - começar uma transação
-5. `commit` - comitar as mudanças
-6. `rollback` - desfazer as mudanças
-7. `snap YYYY-MM-DD HH:MM:SS` - ver como o banco estava no passado
-8. `snap -1d` - ver como o banco estava há 24 horas atrás
-9. `exit` ou Ctrl + C - encerrar o programa
+4. `=start` - começar uma transação
+5. `=commit` - comitar as mudanças
+6. `=rollback` - desfazer as mudanças
+7. `=snap YYYY-MM-DD HH:MM:SS` - ver como o banco estava no passado
+8. `=snap -1d` - ver como o banco estava há 24 horas atrás
+9. `=exit` ou Ctrl + C - encerrar o programa
+10. `=stress N` incrementar a chave `INC`, N vezes
 
 ## Performance
 é terrível, em uma máquina boa, mais ou menos 40ms por transação, 25 transações por segundo

@@ -1,4 +1,9 @@
-use std::fmt::Display;
+use std::{
+    fmt::Display,
+    time::{Duration, SystemTime},
+};
+
+use chrono::Local;
 
 pub trait DisplayBytesEx: AsRef<[u8]> {
     fn display<'a>(&'a self) -> DisplayBytes<&'a Self> {
@@ -79,4 +84,58 @@ fn fmt_quoted_str(
         }
     }
     f.write_str(text)
+}
+
+pub fn parse_general_timestamp(input: &str) -> Option<SystemTime> {
+    let input = input.trim();
+    if input.starts_with('-') {
+        return parse_duration(&input[1..]).and_then(|x| SystemTime::now().checked_sub(x));
+    }
+    let patterns = [
+        "%Y-%m-%d %H:%M:%S%.f",
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%d",
+        "%H:%M:%S",
+        "%H:%M",
+    ];
+
+    for pattern in patterns {
+        if let Ok(naive) = chrono::NaiveDateTime::parse_from_str(input, pattern) {
+            return naive.and_local_timezone(Local).earliest().map(|x| x.into());
+        }
+    }
+    None
+}
+
+pub fn parse_duration(input: &str) -> Option<Duration> {
+    dbg!(input);
+    let input = input.trim().to_lowercase();
+
+    let index = input.find(|x: char| !x.is_ascii_digit() && x != '.')?;
+
+    let (value, unit) = input.split_at(index);
+
+    let value = value.parse::<f64>().ok()?;
+
+    match unit {
+        "ms" | "millisecond" | "milliseconds" | "millis" | "milissegundo" | "milissegundos" => {
+            Duration::try_from_secs_f64(value * 0.001).ok()
+        }
+        "s" | "second" | "seconds" | "segundo" | "segundos" => {
+            Duration::try_from_secs_f64(value).ok()
+        }
+        "m" | "minute" | "minutes" | "minuto" | "minutos" => {
+            Duration::try_from_secs_f64(value * 60.0).ok()
+        }
+        "h" | "hour" | "hours" | "hora" | "horas" => {
+            Duration::try_from_secs_f64(value * 60.0 * 60.0).ok()
+        }
+        "d" | "day" | "days" | "dia" | "dias" => {
+            Duration::try_from_secs_f64(value * 60.0 * 60.0 * 24.0).ok()
+        }
+        "w" | "week" | "weeks" | "semana" | "semanas" => {
+            Duration::try_from_secs_f64(value * 60.0 * 60.0 * 24.0 * 7.0).ok()
+        }
+        _ => None,
+    }
 }

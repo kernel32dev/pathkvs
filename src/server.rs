@@ -1,11 +1,36 @@
-use std::{io::Error, time::Duration};
+use std::{io::Error, path::Path, time::Duration};
 
-use pathkvs_core::error::{ProtocolError, TransactionConflict, TransposeConflict};
+use pathkvs_core::{
+    error::{ProtocolError, TransactionConflict, TransposeConflict},
+    DatabaseWriteSyncMode,
+};
 
-pub fn serve() -> Result<std::convert::Infallible, Error> {
-    let listener = std::net::TcpListener::bind("127.0.0.1:6314")?;
-    let database = pathkvs_core::Database::open("data.pathkvs")?;
+pub fn serve(
+    path: Option<impl AsRef<Path>>,
+    sync: DatabaseWriteSyncMode,
+) -> Result<std::convert::Infallible, Error> {
+    let addr = "127.0.0.1:6314";
+    let listener = std::net::TcpListener::bind(addr)?;
+    let mem = path.is_none();
+    let database = match path {
+        Some(path) => pathkvs_core::Database::open(path)?.write_sync_mode(sync),
+        None => pathkvs_core::Database::memory(),
+    };
     let database = &*Box::leak(Box::new(database));
+    match sync {
+        _ if mem => {
+            println!("servindo banco sem persistência em {addr}");
+        }
+        DatabaseWriteSyncMode::Sync => {
+            println!("servindo banco em {addr}");
+        }
+        DatabaseWriteSyncMode::Flush => {
+            println!("servindo banco não ACID em {addr} (modo flush)");
+        }
+        DatabaseWriteSyncMode::Cached => {
+            println!("servindo banco não ACID em {addr} (modo cached)");
+        }
+    }
     loop {
         let (mut stream, _) = listener.accept()?;
         std::thread::spawn(move || {
@@ -90,24 +115,20 @@ impl pathkvs_net::server::Server for Server {
 
     fn rollback(&mut self) -> Result<(), Error> {
         match std::mem::take(&mut self.mode) {
-            ServerMode::Normal => {},
-            ServerMode::Transaction(tr) => {tr.rollback();},
-            ServerMode::Snapshot(_) => {},
+            ServerMode::Normal => {}
+            ServerMode::Transaction(tr) => {
+                tr.rollback();
+            }
+            ServerMode::Snapshot(_) => {}
         }
         Ok(())
     }
 
     fn count(&mut self, start: &[u8], end: &[u8]) -> Result<u32, Error> {
         match &mut self.mode {
-            ServerMode::Normal => {
-                Ok(self.db.count(start, end))
-            }
-            ServerMode::Transaction(tr) => {
-                Ok(tr.count(start, end))
-            }
-            ServerMode::Snapshot(sn) => {
-                Ok(sn.count(start, end))
-            },
+            ServerMode::Normal => Ok(self.db.count(start, end)),
+            ServerMode::Transaction(tr) => Ok(tr.count(start, end)),
+            ServerMode::Snapshot(sn) => Ok(sn.count(start, end)),
         }
     }
     fn list(
@@ -125,7 +146,7 @@ impl pathkvs_net::server::Server for Server {
             }
             ServerMode::Snapshot(sn) => {
                 write(&sn.list(start, end));
-            },
+            }
         }
         Ok(())
     }
@@ -144,7 +165,7 @@ impl pathkvs_net::server::Server for Server {
             }
             ServerMode::Snapshot(sn) => {
                 write(&sn.scan(start, end));
-            },
+            }
         }
         Ok(())
     }

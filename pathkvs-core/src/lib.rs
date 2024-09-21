@@ -16,8 +16,21 @@ pub mod error;
 
 pub struct Database {
     resolved_master: AtomicPtr<Commit>,
+    persistence: Option<Persistence>,
+}
+
+pub struct Persistence {
     serialized_master: AtomicPtr<Commit>,
     history_sink: Mutex<HistorySink>,
+    sync: DatabaseWriteSyncMode,
+}
+
+#[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DatabaseWriteSyncMode {
+    #[default]
+    Sync,
+    Flush,
+    Cached,
 }
 
 struct _AssertDatabaseSend
@@ -54,6 +67,12 @@ pub struct Snapshot<'a> {
 }
 
 impl Database {
+    pub fn memory() -> Self {
+        Self {
+            resolved_master: AtomicPtr::new(std::ptr::null_mut()),
+            persistence: None,
+        }
+    }
     pub fn create(path: impl AsRef<Path>) -> Result<Self, Error> {
         let file = std::fs::File::options()
             .read(true)
@@ -63,10 +82,13 @@ impl Database {
             .open(path)?;
         Ok(Self {
             resolved_master: AtomicPtr::new(std::ptr::null_mut()),
-            serialized_master: AtomicPtr::new(std::ptr::null_mut()),
-            history_sink: Mutex::new(HistorySink {
-                output_stream: file,
-                cursor: 0,
+            persistence: Some(Persistence {
+                serialized_master: AtomicPtr::new(std::ptr::null_mut()),
+                history_sink: Mutex::new(HistorySink {
+                    output_stream: file,
+                    cursor: 0,
+                }),
+                sync: DatabaseWriteSyncMode::default(),
             }),
         })
     }
@@ -92,7 +114,7 @@ impl Database {
             let nanoseconds = u32::from_le_bytes(nanoseconds);
 
             if nanoseconds >= 1_000_000_000 {
-                todo!();
+                return Err(Error::new(ErrorKind::UnexpectedEof, "bad nanosecond field"));
             }
 
             let mut kv_len = [0; 4];
@@ -153,18 +175,34 @@ impl Database {
 
         Ok(Self {
             resolved_master: AtomicPtr::new(commit_ptr),
-            serialized_master: AtomicPtr::new(commit_ptr),
-            history_sink: Mutex::new(HistorySink {
-                output_stream: file,
-                cursor,
+            persistence: Some(Persistence {
+                serialized_master: AtomicPtr::new(commit_ptr),
+                history_sink: Mutex::new(HistorySink {
+                    output_stream: file,
+                    cursor,
+                }),
+                sync: DatabaseWriteSyncMode::default(),
             }),
         })
+    }
+    pub fn write_sync_mode(mut self, sync_mode: DatabaseWriteSyncMode) -> Self {
+        if let Some(persitence) = &mut self.persistence {
+            persitence.sync = sync_mode;
+        }
+        self
+    }
+    fn load_master(&self) -> *const Commit {
+        if let Some(persistence) = &self.persistence {
+            persistence.serialized_master.load(Ordering::SeqCst)
+        } else {
+            self.resolved_master.load(Ordering::SeqCst)
+        }
     }
     pub fn start_writes<'a>(&'a self) -> Transaction<'a> {
         Transaction {
             database: self,
             commit: Commit {
-                prev: self.serialized_master.load(Ordering::SeqCst),
+                prev: self.load_master(),
                 time: Duration::default(),
                 changes: HashMap::new(),
             },
@@ -189,12 +227,12 @@ impl Database {
     pub fn snapshot<'a>(&'a self) -> Snapshot<'a> {
         unsafe {
             Snapshot {
-                commit: self.serialized_master.load(Ordering::SeqCst).as_ref(),
+                commit: self.load_master().as_ref(),
             }
         }
     }
     pub fn past_unix_time_snapshot_with<'a>(&'a self, time: Duration) -> Snapshot<'a> {
-        let mut commit = self.serialized_master.load(Ordering::SeqCst) as *const Commit;
+        let mut commit = self.load_master();
         unsafe {
             while let Some(reference) = commit.as_ref() {
                 if reference.time <= time {
@@ -236,10 +274,13 @@ impl Database {
     }
 
     fn persist(&self) -> Result<(), Error> {
+        let Some(persistence) = &self.persistence else {
+            return Ok(());
+        };
         loop {
             let mut resolved_master = self.resolved_master.load(Ordering::SeqCst) as *const Commit;
-            let mut workbench = self.history_sink.lock().unwrap();
-            let serialized_master = self.serialized_master.load(Ordering::SeqCst) as *const Commit;
+            let mut workbench = persistence.history_sink.lock().unwrap();
+            let serialized_master = persistence.serialized_master.load(Ordering::SeqCst) as *const Commit;
             let mut stack = Vec::new();
             while resolved_master != serialized_master {
                 stack.push(resolved_master);
@@ -278,9 +319,17 @@ impl Database {
                     workbench.output_stream.write_all(&v)?;
                     new_cursor += 8 + k.len() as u64 + v.len() as u64;
                 }
-                workbench.output_stream.flush()?;
-                workbench.output_stream.sync_all()?;
-                self.serialized_master
+                match persistence.sync {
+                    DatabaseWriteSyncMode::Sync => {
+                        workbench.output_stream.flush()?;
+                        workbench.output_stream.sync_all()?;
+                    }
+                    DatabaseWriteSyncMode::Flush => {
+                        workbench.output_stream.flush()?;
+                    }
+                    DatabaseWriteSyncMode::Cached => {}
+                }
+                persistence.serialized_master
                     .store(commit as *mut _, Ordering::SeqCst);
                 workbench.cursor = new_cursor;
             }
